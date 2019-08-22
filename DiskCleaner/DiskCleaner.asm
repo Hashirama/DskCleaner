@@ -20,6 +20,7 @@ TokenUser = 1
 ERROR_INSUFFICIENT_BUFFER = 122
 BUF_SZ = 260
 VIEW_BTN = 108
+DELETE_BTN = 109
 INFINITE = 4294967295
 
 struct TVHITTESTINFO
@@ -127,9 +128,16 @@ proc AddButtons hwnd
      mov edi, [hwnd]
      invoke CreateWindowEx,0,'BUTTON','View',\
      WS_VISIBLE+WS_CHILD,\
-     0,0,60,40,edi,\
+     0,5,60,40,edi,\
      VIEW_BTN, [wc.hInstance],0
      mov [View_Hwnd], eax
+
+
+     invoke CreateWindowEx,0,'BUTTON','Delete',\
+     WS_VISIBLE+WS_CHILD,\
+     80,5,60,40,edi,\
+     DELETE_BTN, [wc.hInstance],0
+     mov [Delete_Hwnd], eax
 
      .exit:
         pop edi
@@ -353,12 +361,9 @@ proc AddTreeView hwnd
      mov [tvinsert.item.pszText],_Temp
      mov [tvinsert.item.mask],TVIF_TEXT
      invoke SendMessage,[TreeView],TVM_INSERTITEM,0,tvinsert
-     mov [tvinsert.item.pszText],_Clip
-     invoke  SendMessage,[TreeView],TVM_INSERTITEM,0,tvinsert
 
      mov eax, [Root]
      invoke SendMessage,[TreeView],TVM_EXPAND,TVE_EXPAND,eax
-
 
      mov [tvinsert.hParent],NULL
      mov [tvinsert.hInsertAfter],TVI_ROOT
@@ -372,11 +377,7 @@ proc AddTreeView hwnd
      mov [tvinsert.item.pszText],_Cookie
      invoke SendMessage,[TreeView],TVM_INSERTITEM,0,tvinsert
 
-     mov [tvinsert.item.pszText],_Form
-     invoke  SendMessage,[TreeView],TVM_INSERTITEM,0,tvinsert
      mov [tvinsert.item.pszText],_History
-     invoke  SendMessage,[TreeView],TVM_INSERTITEM,0,tvinsert
-     mov [tvinsert.item.pszText],_Temp
      invoke  SendMessage,[TreeView],TVM_INSERTITEM,0,tvinsert
 
      mov eax, [Second]
@@ -411,12 +412,21 @@ proc ExpandStrs
           WTmp db "%windir%\temp",0
           Cookie_1 db "%LOCALAPPDATA%\Microsoft\Internet Explorer\DOMStore",0
           Cookie_2 db "%USERPROFILE%\AppData\LocalLow\Microsoft\Internet Explorer\DOMStore",0
+          ;HKCU\Software\Microsoft\Internet Explorer\IntelliForms\Storage1
+          ;HKCU\Software\Microsoft\Internet Explorer\IntelliForms\Storage2
+          history_1 db "%LocalAppData%\Microsoft\Internet Explorer\Recovery\Active",0
+          history_2 db "%LocalAppData%\Microsoft\Internet Explorer\Recovery\Immersive\Active",0
+          history_3 db "%LocalAppData%\Microsoft\Internet Explorer\Recovery\Last Active",0
+
      endl
       invoke ExpandEnvironmentStrings,addr LocalSet,LocalSettings,BUF_SZ
       invoke ExpandEnvironmentStrings,addr Tmp,Temp,BUF_SZ
       invoke ExpandEnvironmentStrings,addr WTmp,WinTmp,BUF_SZ
       invoke ExpandEnvironmentStrings,addr Cookie_1,IE_Cookies,BUF_SZ
       invoke ExpandEnvironmentStrings,addr Cookie_2,IE_Cookies2,BUF_SZ
+      invoke ExpandEnvironmentStrings,addr history_1,IE_History1,BUF_SZ
+      invoke ExpandEnvironmentStrings,addr history_2,IE_History2,BUF_SZ
+      invoke ExpandEnvironmentStrings,addr history_3,IE_History3,BUF_SZ
      ret
 endp
 
@@ -587,11 +597,15 @@ proc WinProc uses ebx esi edi,hwnd,wmsg,wparam,lparam
      je .DESTROY
      cmp eax,VIEW_BTN
      je .VIEW
+     cmp eax,DELETE_BTN
+     je .DELETE
      jmp .DEFAULT
       .ABOUT:
         invoke DialogBoxParam,[wc.hInstance],37,[hWnd],DlgProc,NULL
         jmp .END
  .VIEW:
+     mov [File_Cnt], 0
+     invoke SetWindowText,[Edit_Hwnd],''
      invoke CreateThread,0,0,SystemSelection,0,0,0
      mov [hThread_System],eax
      invoke CreateThread,0,0,InternerExplorerProc,0,0,0
@@ -599,10 +613,238 @@ proc WinProc uses ebx esi edi,hwnd,wmsg,wparam,lparam
      invoke CreateThread,0,0,WaitUpdateCount,0,0,0
      invoke CloseHandle,eax
      jmp .END
+ .DELETE:
+     mov eax, [File_Cnt]
+     cmp eax,0
+     jz .END
+     invoke MessageBox,NULL,"Are you sure you want to remove these files?","Delete",MB_OKCANCEL
+     cmp eax,IDCANCEL
+     jz .END
+     invoke CreateThread,0,0,RemoveFiles,0,0,0
+     mov [hThread_System+8],eax
+     invoke CreateThread,0,0,WaitUpdateCount,1,0,0
+     invoke CloseHandle,eax
+     jmp .END
  .DESTROY:
      invoke PostQuitMessage,0
  .END:
      ret
+endp
+
+
+proc RemoveFiles
+     locals
+        it TV_ITEM 0
+        buf db 260 dup(?)
+     endl
+     mov eax, TVIF_HANDLE
+     or eax, TVIF_STATE
+     or eax, TVIF_TEXT
+     mov [it.mask], eax
+     mov [it.stateMask],TVIS_STATEIMAGEMASK
+     mov [it.cchTextMax],260
+     lea eax,[buf]
+     mov [it.pszText], eax
+     invoke SendMessage,[TreeView],TVM_GETNEXTITEM,TVGN_CHILD,[Root]
+     test eax,eax
+     jz .exit
+     mov [it.hItem],eax
+     invoke SendMessage,[TreeView],TVM_GETITEM,0,addr it
+     test eax,eax
+     jz .exit
+
+    .L1:
+     mov eax,[it.state]
+     and eax,0FF00h
+     cmp eax,1000h
+     je .L2
+     cmp eax,2000h
+     jne .exit
+     push _Recycle_path
+     call DeleteFiles
+     .L2:
+      invoke SendMessage,[TreeView],TVM_GETNEXTITEM,TVGN_NEXT,[it.hItem]
+      mov [it.hItem],eax
+      invoke SendMessage,[TreeView],TVM_GETITEM,0,addr it
+      mov eax,[it.state]
+      and eax, 0FF00h
+      cmp eax,1000h
+      jz .second
+      cmp eax,2000h
+      jne .cookies
+
+      push LocalSettings
+      call DeleteFiles
+
+      push Temp
+      call DeleteFiles
+
+      push WinTmp
+      call DeleteFiles
+
+    .second:
+
+     invoke SendMessage,[TreeView],TVM_GETNEXTITEM,TVGN_CHILD,[Second]
+     test eax,eax
+     jz .exit
+     mov [it.hItem],eax
+     invoke SendMessage,[TreeView],TVM_GETITEM,0,addr it
+     test eax,eax
+     jz .exit
+
+     .cookies:
+     mov eax,[it.state]
+     and eax,0FF00h
+     cmp eax,2000h
+     jne .history
+      push IE_Cookies
+      call DeleteFiles
+
+      push IE_Cookies2
+      call DeleteFiles
+
+     .history:
+      invoke SendMessage,[TreeView],TVM_GETNEXTITEM,TVGN_NEXT,[it.hItem]
+      mov [it.hItem],eax
+      invoke SendMessage,[TreeView],TVM_GETITEM,0,addr it
+      mov eax, [it.state]
+      and eax, 0FF00h
+      cmp eax,2000h
+      jne .exit
+      ;search history calls
+      ;
+
+      push IE_History1
+      call DeleteFiles
+
+      push IE_History2
+      call DeleteFiles
+
+      push IE_History3
+      call DeleteFiles
+
+    .exit:
+     ret
+endp
+
+proc DeleteFiles, path
+   ; invoke MessageBox,NULL,[path],_title,MB_OK
+
+     locals
+      data WIN32_FIND_DATA ?
+      hand dd ?
+      tmp db "\*",0
+      back_slash db "\",0
+      root_dir db "..",0
+      curr_dir db ".",0
+      space_char db "   ",0
+      tmpbuf db 260 dup(?)
+     endl
+     push edx
+     push ebx
+     push ecx
+     xor ecx,ecx
+
+     push 260
+     push [path]
+     lea edx,[tmpbuf]
+     push edx
+     call StrCpy
+
+     push 260
+     lea edx,[tmp]
+     push edx
+     lea edx,[tmpbuf]
+     push edx
+     call StrCat
+
+     invoke FindFirstFile,addr tmpbuf,addr data
+     cmp eax,INVALID_HANDLE_VALUE
+     jz .exit
+     mov [hand],eax
+     mov eax, [data.dwFileAttributes]
+     and eax, FILE_ATTRIBUTE_DIRECTORY
+     jz .file
+     jnz .directory
+    .next:
+
+     invoke FindNextFile,[hand],addr data
+     test eax,eax
+     jz .exit
+     mov eax, [data.dwFileAttributes]
+     and eax, FILE_ATTRIBUTE_DIRECTORY
+     jz .file
+     jnz .directory
+    .directory:
+      lea edx, [data.cFileName]
+      push edx
+      lea edx, [curr_dir]
+      push edx
+      call strcmp
+      cmp eax,0
+      jz .next
+
+      lea edx, [data.cFileName]
+      push edx
+      lea edx, [curr_dir]
+      push edx
+      call strcmp
+      cmp eax,0
+      jz .next
+
+      push 260
+      push [path]
+      lea eax,[tmpbuf]
+      push eax
+      call StrCpy
+
+      push 260
+      lea edx,[back_slash]
+      push edx
+      lea edx,[tmpbuf]
+      push edx
+      call StrCat
+
+      push 260
+      lea edx, [data.cFileName]
+      push edx
+      lea edx,[tmpbuf]
+      push edx
+      call StrCat
+
+      lea edx,[tmpbuf]
+      push edx
+      call DeleteFiles
+
+      jmp .next
+    .file:
+       push 260
+       push [path]
+       lea eax,[tmpbuf]
+       push eax
+       call StrCpy
+
+       push 260
+       lea edx,[back_slash]
+       push edx
+       lea edx,[tmpbuf]
+       push edx
+       call StrCat
+
+       push 260
+       lea edx, [data.cFileName]
+       push edx
+       lea edx,[tmpbuf]
+       push edx
+       call StrCat
+
+       invoke DeleteFile,addr tmpbuf
+       jmp .next
+
+   .exit:
+    mov esp,ebp
+    pop ebp
+    ret 4
 endp
 
 proc DlgProc uses esi edi ebx,hwnddlg,msg,wparam,lparam
@@ -637,14 +879,27 @@ proc DlgProc uses esi edi ebx,hwnddlg,msg,wparam,lparam
     ret
 endp
 
-proc WaitUpdateCount
+proc WaitUpdateCount, p
+     mov eax,[p]
+     cmp eax, 1
+     jz .second
      invoke WaitForMultipleObjects,2,hThread_System,1,INFINITE
      invoke CloseHandle,[hThread_System]
      invoke CloseHandle,[hThread_System+4]
 
      push [File_Cnt]
      call DisplayCnt
-     ret
+     jmp .exit
+
+   .second:
+     invoke WaitForSingleObject,[hThread_System+8],INFINITE
+     invoke MessageBox,NULL,"Completed","INFO",MB_OK
+
+   .exit:
+
+     mov esp,ebp
+     pop ebp
+     ret 4
 endp
 
 proc SystemSelection
@@ -684,7 +939,7 @@ proc SystemSelection
       mov eax,[it.state]
       and eax, 0FF00h
       cmp eax,1000h
-      jz .L3
+      jz .exit
       cmp eax,2000h
       jne .exit
 
@@ -697,14 +952,6 @@ proc SystemSelection
       push WinTmp
       call ListFiles
 
-     .L3:
-      invoke SendMessage,[TreeView],TVM_GETNEXTITEM,TVGN_NEXT,[it.hItem]
-      mov [it.hItem],eax
-      invoke SendMessage,[TreeView],TVM_GETITEM,0,addr it
-      mov eax, [it.state]
-      and eax, 0FF00h
-      cmp eax,2000h
-      jne .exit
     .exit:
      ret
 endp
@@ -733,24 +980,12 @@ proc InternerExplorerProc
      mov eax,[it.state]
      and eax,0FF00h
      cmp eax,2000h
-     jne .form_history
+     jne .history
       push IE_Cookies
       call ListFiles
 
       push IE_Cookies2
       call ListFiles
-
-     .form_history:
-      invoke SendMessage,[TreeView],TVM_GETNEXTITEM,TVGN_NEXT,[it.hItem]
-      mov [it.hItem],eax
-      invoke SendMessage,[TreeView],TVM_GETITEM,0,addr it
-      mov eax,[it.state]
-      and eax, 0FF00h
-      cmp eax,2000h
-      jne .history
-      ;form history calls
-      ;
-
 
      .history:
       invoke SendMessage,[TreeView],TVM_GETNEXTITEM,TVGN_NEXT,[it.hItem]
@@ -759,20 +994,18 @@ proc InternerExplorerProc
       mov eax, [it.state]
       and eax, 0FF00h
       cmp eax,2000h
-      jne .temporary_files
+      jne .exit
       ;search history calls
       ;
 
-      .temporary_files:
-      invoke SendMessage,[TreeView],TVM_GETNEXTITEM,TVGN_NEXT,[it.hItem]
-      mov [it.hItem],eax
-      invoke SendMessage,[TreeView],TVM_GETITEM,0,addr it
-      mov eax, [it.state]
-      and eax, 0FF00h
-      cmp eax,2000h
-      jne .exit
-      ;temp file calls
-      ;
+      push IE_History1
+      call ListFiles
+
+      push IE_History2
+      call ListFiles
+
+      push IE_History3
+      call ListFiles
 
     .exit:
      ret
@@ -1356,6 +1589,7 @@ section '.data' data readable writable
         _Recycle_path db 260 dup(?)
         View_Hwnd dd ?
         Edit_Hwnd dd ?
+        Delete_Hwnd dd ?
         buffy db 260 dup(?)
         hThread_System dd 0
                        dd 0
@@ -1368,6 +1602,9 @@ section '.data' data readable writable
         File_Handle dd ?
         IE_Cookies db 260 dup(?)
         IE_Cookies2 db 260 dup(?)
+        IE_History1 db 260 dup(?)
+        IE_History2 db 260 dup(?)
+        IE_History3 db 260 dup(?)
         ;pDesktop LPSHELLFOLDER ?
 
 
@@ -1441,7 +1678,8 @@ section '.idata' import readable
         CloseHandle, 'CloseHandle',\
         ExpandEnvironmentStrings, 'ExpandEnvironmentStringsA',\
         GetFileAttributes, 'GetFileAttributesW',\
-        WaitForMultipleObjects, 'WaitForMultipleObjects'
+        WaitForMultipleObjects, 'WaitForMultipleObjects',\
+        DeleteFile, 'DeleteFileA'
  import gdi32,\
         TextOut, 'TextOutA',\
         CreateFont, 'CreateFontA',\
